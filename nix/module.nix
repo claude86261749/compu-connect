@@ -76,7 +76,7 @@ let
 
   tools = pkgs.buildEnv {
     name = "mcp-session-tools";
-    paths = cfg.packages;
+    paths = cfg.packages ++ cfg.extraPackages;
     pathsToLink = [
       "/bin"
       "/share"
@@ -300,6 +300,13 @@ in
       '';
     };
 
+    extraPackages = mkOption {
+      type = types.listOf types.package;
+      default = [ ];
+      example = literalExpression "[ pkgs.rustc pkgs.cargo ]";
+      description = "Programs a session has on top of {option}`packages`.";
+    };
+
     auditCommands = mkOption {
       type = types.bool;
       default = true;
@@ -381,6 +388,15 @@ in
         type = types.int;
         default = 50;
         description = "The sessions' share of a busy CPU, against 100 for everything else on the machine.";
+      };
+      memlock = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "infinity";
+        description = ''
+          How much memory a session's process may lock or have pinned (systemd LimitMEMLOCK=). GPU compute
+          drivers pin the memory they share with the card. What is pinned still counts against {option}`memoryMax`.
+        '';
       };
       sessionMemoryMax = mkOption {
         type = types.nullOr types.str;
@@ -719,7 +735,8 @@ in
       }
       // optionalAttrs (cfg.limits.sessionMemoryMax != null) { MemoryMax = cfg.limits.sessionMemoryMax; }
       # VFIO pins the memory a device may reach.
-      // optionalAttrs (vfio != [ ]) { LimitMEMLOCK = "infinity"; };
+      // optionalAttrs (vfio != [ ]) { LimitMEMLOCK = "infinity"; }
+      // optionalAttrs (cfg.limits.memlock != null) { LimitMEMLOCK = cfg.limits.memlock; };
     };
 
     systemd.services.mcp-sync = {
