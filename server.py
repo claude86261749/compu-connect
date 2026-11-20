@@ -8,7 +8,12 @@ quick tunnel). Every request needs `Authorization: Bearer <token>`.
 
     python3 server.py --port 8765 --token-file ~/.remote-compute/token
 
-Anyone holding the token has a root shell on this machine: keep it private, stop the server when done.
+Anyone holding the token has a shell on this machine as the user who started this: keep it private, stop the server
+when done.
+
+In the always-on setup this is the worker behind gateway.py instead: it listens on a Unix socket (--unix PATH, or
+--systemd-socket for one systemd passes in) and asks for no token, because the gateway has checked it and only the
+gateway may connect.
 """
 
 import argparse
@@ -18,6 +23,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -34,7 +40,8 @@ RUN_MAX_S = 90
 OUT_MAX = 64 * 1024
 READ_MAX = 8 * 1024 * 1024
 
-TOKEN = ""
+# None when this is a worker behind the gateway: the socket's permissions are the check.
+TOKEN = None
 DEFAULT_CWD = str(Path.home())
 
 
@@ -357,6 +364,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def authorized(self):
+        if TOKEN is None:
+            return True
         got = self.headers.get("Authorization", "")
         return hmac.compare_digest(got.encode(), ("Bearer " + TOKEN).encode())
 
@@ -394,23 +403,63 @@ def reap():
         time.sleep(5)
 
 
+class UnixServer(ThreadingHTTPServer):
+    """The worker's listener: a Unix socket that only its owner may connect to."""
+
+    address_family = socket.AF_UNIX
+    request_queue_size = 64
+
+    def server_bind(self):
+        try:
+            os.unlink(self.server_address)
+        except FileNotFoundError:
+            pass
+        old = os.umask(0o177)
+        try:
+            self.socket.bind(self.server_address)
+        finally:
+            os.umask(old)
+        self.server_name, self.server_port = "localhost", 0
+
+
+def listener(a):
+    """(server, where it listens)."""
+    if a.systemd_socket:
+        if os.environ.get("LISTEN_PID") != str(os.getpid()) or int(os.environ.get("LISTEN_FDS", "0")) < 1:
+            sys.exit("--systemd-socket: systemd passed no socket in (this is started by a .socket unit)")
+        srv = UnixServer("", Handler, bind_and_activate=False)
+        srv.socket.close()
+        srv.socket = socket.socket(fileno=3)
+        srv.server_name, srv.server_port = "localhost", 0
+        # Commands started from here are not socket-activated services.
+        for k in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):
+            os.environ.pop(k, None)
+        return srv, "the socket systemd passed in"
+    if a.unix:
+        return UnixServer(a.unix, Handler), a.unix
+    return ThreadingHTTPServer((a.host, a.port), Handler), "http://%s:%d/mcp" % (a.host, a.port)
+
+
 def main():
     global TOKEN, DEFAULT_CWD
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--token-file", default=str(HOME / "token"))
+    ap.add_argument("--unix", metavar="PATH", help="be a worker: listen on this Unix socket and ask for no token")
+    ap.add_argument("--systemd-socket", action="store_true", help="be a worker on the socket systemd passed in")
     ap.add_argument("--cwd", default=DEFAULT_CWD, help="where commands run when no cwd is given")
     a = ap.parse_args()
-    TOKEN = os.environ.get("REMOTE_COMPUTE_SERVER_TOKEN") or Path(a.token_file).expanduser().read_text().strip()
-    if len(TOKEN) < 24:
-        sys.exit("the token must be at least 24 characters")
+    if not (a.unix or a.systemd_socket):
+        TOKEN = os.environ.get("REMOTE_COMPUTE_SERVER_TOKEN") or Path(a.token_file).expanduser().read_text().strip()
+        if len(TOKEN) < 24:
+            sys.exit("the token must be at least 24 characters")
     DEFAULT_CWD = str(Path(a.cwd).expanduser())
     JOBS.mkdir(parents=True, exist_ok=True)
     threading.Thread(target=reap, daemon=True).start()
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    srv, where = listener(a)
     srv.daemon_threads = True
-    print("remote-compute MCP on http://%s:%d/mcp" % (a.host, a.port), flush=True)
+    print("remote-compute MCP on %s" % where, flush=True)
     srv.serve_forever()
 
 

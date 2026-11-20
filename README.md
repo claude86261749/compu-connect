@@ -2,7 +2,16 @@
 
 **Remote Compute**: a small MCP server that gives a Claude Code session (one that can only reach the web over
 HTTPS) a shell on a machine you own. It can run commands, start long jobs and read their logs, and move files
-both ways. It sits behind a Cloudflare quick tunnel.
+both ways.
+
+There are two ways to run it:
+
+- **For an afternoon**, below: one command, a Cloudflare quick tunnel, one token, a shell as whoever ran it.
+- **Always on**, in [docs/always-on.md](docs/always-on.md): your own domain through a small relay of your own, tokens
+  that root mints with `mcpctl` (12 hours by default, 7 days at most), a list of who is connected, and every session
+  confined to one sandboxed account, with only the devices you list.
+
+## For an afternoon
 
 On the machine (bare Ubuntu/Debian or Amazon Linux 2/2023 is fine):
 
@@ -21,7 +30,7 @@ REMOTE_COMPUTE_TOKEN=<token>
 `bash ~/.remote-compute/start.sh status` shows whether it's running; `… stop` stops it. If you ran it from a
 checkout, use that checkout's `start.sh` instead.
 
-## Safety
+### Safety
 
 - Nothing secret is in this repo. The token is made on the machine at first start (32 random bytes), kept in
   `~/.remote-compute/token` with mode 600, and printed only to the terminal you ran `start.sh` in.
@@ -36,6 +45,12 @@ checkout, use that checkout's `start.sh` instead.
 
 | file | what it is |
 |---|---|
-| `start.sh` | starts, stops and reports on the server and the tunnel |
-| `server.py` | the MCP server (Python 3.7+, standard library only): `run`, `spawn`, `job`, `jobs`, `kill`, `read_file`, `write_file`, `list_dir`, `info` |
+| `start.sh` | starts, stops and reports on the server and the quick tunnel |
+| `server.py` | the MCP server (Python 3.7+, standard library only): `run`, `spawn`, `job`, `jobs`, `kill`, `read_file`, `write_file`, `list_dir`, `info`. In the always-on setup, the worker of one token |
 | `client.py` | a command-line client for the same server. It reads the two lines from the environment or from `~/.remote-compute.env` |
+| `gateway.py` | always-on: checks tokens, keeps the list of sessions, hands each request to its token's worker |
+| `mcpctl.py` | always-on: the operator's command, `create`, `tokens`, `sessions`, `revoke`, `status` |
+| `cclib.py` | always-on: the token store and configuration the two share |
+| `nix/module.nix` | always-on: the NixOS module, with the account, the sandbox, the tunnel and device access |
+| `relay/startup.sh` | always-on: the whole relay, for a small Debian machine such as a GCE `e2-micro` |
+| `tests/`, `nix/test*.nix` | the tests: Python-only, and in virtual machines |
