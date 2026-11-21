@@ -51,8 +51,16 @@ before there is a relay, set `localPort = 8765` for the time being and use `http
 
 ### 2. The relay
 
-[relay/README.md](../relay/README.md): one script on a small Debian machine, with the commands for Google Cloud. You
-give it your domain and the key from step 1; it tells you its address and SSH host key.
+On Google Cloud, one command, run again whenever you like:
+
+```sh
+relay/gcp-tunnel up --project my-project --domain mcp.example.com --tunnel-key tunnel.pub
+```
+
+with the key from step 1 as `tunnel.pub` (on the box itself it is found without `--tunnel-key`). It creates the
+network, firewall, static address and instance, keeps its keys in `.tunnel/` (ignored by git), and prints the
+settings for step 3; `relay/gcp-tunnel nix` prints them again. Point the domain's A record at the address it
+prints, or pass `--dns-zone` and it does that too. Details, and other providers: [relay/README.md](../relay/README.md).
 
 ### 3. Connect them
 
@@ -138,10 +146,27 @@ Every token runs as the same account, `mcp-user` (uid 2000), which has no passwo
 | **Devices** | `null`, `zero`, `random`, terminals. Nothing else unless listed (below). `/sys` is visible and read-only, so `lspci` works. |
 | **Network** | Out to the Internet over IPv4, and the machine's own loopback. Not the network the machine is in: every private, link-local and multicast range is blocked, and IPv6 is off. Its name servers are public ones. |
 | **Resources** | All sessions together get at most 75 % of memory, 8192 processes and threads, and half the CPU weight of the rest of the system. No core dumps. |
-| **Software** | What `packages` holds, which is where to add what sessions need (`python3.withPackages (p: [ p.numpy ])`, a compiler, a CUDA toolkit). It has no access to the Nix daemon, so it cannot install through Nix, and as everywhere on NixOS, programs built for other distributions do not run as they are. |
+| **Software** | What `packages` and `extraPackages` hold, and, with `nix.enable = true`, anything Nix can build: `nix build`, `nix develop`, `nix shell nixpkgs#…`, flakes. As everywhere on NixOS, programs built for other distributions do not run as they are. |
 
 All of it is `services.compu-connect.*` options: see [nix/module.nix](../nix/module.nix). A change applies to
 tokens made after the rebuild; running sessions are not restarted.
+
+### Nix
+
+With `services.compu-connect.nix.enable = true`, a session uses the machine's Nix daemon as an ordinary user, like
+any other account on the machine: it cannot change the daemon's settings, turn the build sandbox off, or name its
+own binary caches. What it builds runs under the daemon, as the daemon's build users, so the module puts the
+sessions' network rule on the daemon too: no build reaches the home network either, while downloads from the
+Internet and the binary cache work as before. `nix/test.nix` checks both.
+
+What this changes for the rest of the machine:
+
+- **Everyone's builds** get the same rule, yours included: nothing built here can fetch from the home network
+  (a cache or a Git server on it, say), and the daemon uses IPv4 only.
+- **DNS:** the daemon can no longer ask the router for names, so the machine resolves through systemd-resolved,
+  which the module turns on. It asks the same servers as before.
+- **Not inside a session's limits:** builds use the daemon's memory and CPU, not the sessions' share, and they
+  go on when the token that asked for them ends. What they add to the store stays until it is garbage-collected.
 
 ### The home network
 

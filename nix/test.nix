@@ -43,6 +43,9 @@ pkgs.testers.runNixOSTest {
       networking.extraHosts = "${nodes.relay.networking.primaryIPAddress} mcp.test";
       security.pki.certificateFiles = [ "${tls}/cert.pem" ];
 
+      # There is no Internet in the test: do not wait for the binary cache.
+      nix.settings.substituters = pkgs.lib.mkForce [ ];
+
       services.compu-connect = {
         enable = true;
         domain = "mcp.test";
@@ -50,6 +53,7 @@ pkgs.testers.runNixOSTest {
         relay.host = "relay";
         relay.hostPublicKey = pkgs.lib.removeSuffix "\n" (builtins.readFile "${relayHostKey}/key.pub");
         hardware.devices = [ "/dev/fuse rw" ];
+        nix.enable = true;
         packages = with pkgs; [
           bashInteractive
           coreutils
@@ -161,6 +165,7 @@ pkgs.testers.runNixOSTest {
       LAN = "${nodes.relay.networking.primaryIPAddress}"
       INTERNET = "203.0.113.2"
       BOX = "${nodes.box.networking.primaryIPAddress}"
+      BOX6 = "${nodes.box.networking.primaryIPv6Address}"
 
 
       def client(token, *args):
@@ -264,7 +269,8 @@ pkgs.testers.runNixOSTest {
               "/var/log",
               "/run/compu-connect",
               "/run/current-system",
-              "/nix/var",
+              "/nix/var/nix/db",
+              "/nix/var/nix/profiles",
               "/data/other",
               "/data/other/readable",
           ]:
@@ -349,6 +355,36 @@ pkgs.testers.runNixOSTest {
           box.wait_until_succeeds("curl -fsS -m 5 http://127.0.0.1:9000/")
           can(t1, "curl -fsS -m 10 http://127.0.0.1:9000/")
 
+      with subtest("a session can build with Nix, and its builds cannot reach the home network either"):
+          bash = run(t1, "readlink -f /bin/bash").split("--- stdout ---")[1].strip()
+
+
+          def drv(name, script, extra=""):
+              return (
+                  "'derivation { name = \"%s\"; system = builtins.currentSystem; builder = builtins.storePath %s; "
+                  "args = [ \"-c\" \"%s\" ]; %s }'" % (name, bash, script, extra)
+              )
+
+
+          out = run(t1, "cat $(nix build --impure --no-link --print-out-paths --expr " + drv("who", "echo built-by-uid-$UID > $out") + ")")
+          print(out)
+          # It is built by the daemon, in its sandbox, not by the account.
+          assert "built-by-uid-" in out and "built-by-uid-2000" not in out, out
+          # A build that may use the network (its output's hash is fixed in advance) gets out to the Internet and
+          # not into the home network. The names differ, so that one cannot reuse the other's result.
+          fixed = 'outputHashMode = \"flat\"; outputHashAlgo = \"sha256\"; outputHash = \"dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22\";'
+          fetch = "exec 3<>/dev/tcp/%s/8080 && echo ok > $out"
+          # Blocked packets are dropped, not refused, so a build that tries waits until its time is up.
+          cannot(t1, "timeout 60 nix build --option timeout 20 --impure --no-link --expr " + drv("to-home", fetch % LAN, fixed))
+          can(t1, "timeout 60 nix build --option timeout 20 --impure --no-link --expr " + drv("to-internet", fetch % INTERNET, fixed))
+          # It is an ordinary user of the daemon: it cannot turn the build sandbox off, or write to the store.
+          cannot(t1, "touch /nix/store/x")
+          cannot(
+              t1,
+              "nix build --impure --no-link --option sandbox false --expr "
+              + drv("unsandboxed", "grep -q mcp-user /etc/passwd && echo outside > $out"),
+          )
+
       with subtest("the account can do nothing outside a session either"):
           box.fail("runuser -u mcp-user -- cat /var/lib/compu-connect/tokens.json")
           box.fail("runuser -u mcp-user -- ls /run/compu-connect/sessions")
@@ -379,7 +415,7 @@ pkgs.testers.runNixOSTest {
           out = box.succeed("mcpctl sessions; echo; mcpctl tokens; echo; mcpctl status")
           print(out)
           assert "first" in out and "second" in out and "spawn" in out, out
-          assert BOX in out, "the session list should show where a client comes from: " + out
+          assert BOX in out or BOX6 in out, "the session list should show where a client comes from: " + out
           assert "from outside" in out and "DOWN" not in out, out
           box.succeed("journalctl -u mcp-gateway -o cat --no-pager | grep -F 'sleep 27182' | grep -q '\"tool\": \"spawn\"'")
 

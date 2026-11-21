@@ -76,7 +76,7 @@ let
 
   tools = pkgs.buildEnv {
     name = "mcp-session-tools";
-    paths = cfg.packages ++ cfg.extraPackages;
+    paths = cfg.packages ++ cfg.extraPackages ++ optional cfg.nix.enable config.nix.package;
     pathsToLink = [
       "/bin"
       "/share"
@@ -114,6 +114,7 @@ let
       127.0.0.1 localhost
       ::1 localhost
     '';
+    "nix.conf" = "experimental-features = nix-command flakes\n";
     "resolv.conf" = concatMapStringsSep "" (s: "nameserver ${s}\n") cfg.network.dns + "options edns0\n";
   };
 
@@ -121,7 +122,8 @@ let
   # the account's own directories and the kernel's file systems are mounted into it.
   root = pkgs.runCommand "mcp-session-root" { } (
     ''
-      mkdir -p $out/{dev,proc,sys,run,tmp,var/tmp,nix/store,usr,etc/ssl/certs,etc/pki/tls/certs}
+      mkdir -p $out/{dev,proc,sys,run,tmp,var/tmp,nix/store,usr,etc/ssl/certs,etc/pki/tls/certs,etc/nix}
+      mkdir -p $out/nix/var/nix/daemon-socket
       ${concatMapStringsSep "\n" (d: "mkdir -p $out${d}") (
         [ home ] ++ cfg.workDirs ++ cfg.sandbox.readOnlyPaths
       )}
@@ -138,7 +140,9 @@ let
     ''
     + concatStringsSep "" (
       lib.mapAttrsToList (name: text: ''
-        cp ${pkgs.writeText "mcp-session-etc-${name}" text} $out/etc/${name}
+        cp ${pkgs.writeText "mcp-session-etc-${name}" text} $out/etc/${
+          if name == "nix.conf" then "nix/nix.conf" else name
+        }
       '') etc
     )
   );
@@ -305,6 +309,22 @@ in
       default = [ ];
       example = literalExpression "[ pkgs.rustc pkgs.cargo ]";
       description = "Programs a session has on top of {option}`packages`.";
+    };
+
+    nix = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Let sessions use Nix: `nix build`, `nix develop`, `nix shell`, flakes. They talk to the machine's Nix
+          daemon as an ordinary, untrusted user. Builds then run under the daemon, not in the session, so with
+          this on the daemon and its builds are kept off the private network ranges too (when
+          {option}`network.blockPrivateRanges` is on), and the machine resolves names through systemd-resolved,
+          because the daemon can then no longer ask a name server on the home network. Builds are not counted
+          against the sessions' memory and CPU limits, and what they add to the store stays until it is
+          garbage-collected.
+        '';
+      };
     };
 
     auditCommands = mkOption {
@@ -653,7 +673,8 @@ in
         REMOTE_COMPUTE_HOME = "${home}/.remote-compute";
         SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
         NIX_SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
-      };
+      }
+      // optionalAttrs cfg.nix.enable { NIX_REMOTE = "daemon"; };
       serviceConfig = {
         ExecStart = "${run "server.py"} --systemd-socket --cwd ${home}";
         User = cfg.user;
@@ -673,7 +694,11 @@ in
         # The file system: an empty root from the store, the store itself, and the account's own directories.
         RootDirectory = root;
         MountAPIVFS = true;
-        BindReadOnlyPaths = [ "/nix/store" ] ++ map (p: "-${p}") cfg.sandbox.readOnlyPaths;
+        BindReadOnlyPaths = [
+          "/nix/store"
+        ]
+        ++ optional cfg.nix.enable "/nix/var/nix/daemon-socket"
+        ++ map (p: "-${p}") cfg.sandbox.readOnlyPaths;
         BindPaths = [ home ] ++ map (d: "-${d}") cfg.workDirs;
         TemporaryFileSystem = [ "/dev/shm:rw,nosuid,nodev,mode=1777" ];
         PrivateTmp = true;
@@ -820,6 +845,21 @@ in
         );
       };
     };
+
+    # ---------- Nix for sessions ----------
+
+    # What a session builds runs here, under the daemon: so the daemon gets the sessions' network rule. The
+    # daemon's own downloads come from the Internet and are not affected.
+    systemd.services.nix-daemon.serviceConfig =
+      mkIf (cfg.nix.enable && cfg.network.blockPrivateRanges)
+        {
+          IPAddressDeny = privateRanges ++ cfg.network.extraDeniedRanges ++ [ "::/0" ];
+          IPAddressAllow = [ "localhost" ] ++ cfg.network.allowedRanges;
+        };
+    # With that rule the daemon cannot ask the router for names; the resolver on the loopback asks for it.
+    services.resolved.enable = mkIf (cfg.nix.enable && cfg.network.blockPrivateRanges) (
+      lib.mkDefault true
+    );
 
     # ---------- PCI devices through VFIO ----------
 
