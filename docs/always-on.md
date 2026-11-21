@@ -51,16 +51,8 @@ before there is a relay, set `localPort = 8765` for the time being and use `http
 
 ### 2. The relay
 
-On Google Cloud, one command, run again whenever you like:
-
-```sh
-relay/gcp-tunnel up --project my-project --domain mcp.example.com --tunnel-key tunnel.pub
-```
-
-with the key from step 1 as `tunnel.pub` (on the box itself it is found without `--tunnel-key`). It creates the
-network, firewall, static address and instance, keeps its keys in `.tunnel/` (ignored by git), and prints the
-settings for step 3; `relay/gcp-tunnel nix` prints them again. Point the domain's A record at the address it
-prints, or pass `--dns-zone` and it does that too. Details, and other providers: [relay/README.md](../relay/README.md).
+[relay/README.md](../relay/README.md): one script on a small Debian machine, with the commands for Google Cloud. You
+give it your domain and the key from step 1; it tells you its address and SSH host key.
 
 ### 3. Connect them
 

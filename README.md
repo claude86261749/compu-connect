@@ -53,5 +53,4 @@ checkout, use that checkout's `start.sh` instead.
 | `cclib.py` | always-on: the token store and configuration the two share |
 | `nix/module.nix` | always-on: the NixOS module, with the account, the sandbox, the tunnel and device access |
 | `relay/startup.sh` | always-on: the whole relay, for a small Debian machine such as a GCE `e2-micro` |
-| `relay/gcp-tunnel` | always-on: sets the relay up on Google Cloud and keeps it so (`up`, `status`, `nix`, `ssh`, `logs`, `down`); its keys and settings go in `.tunnel/` |
 | `tests/`, `nix/test*.nix` | the tests: Python-only, and in virtual machines |

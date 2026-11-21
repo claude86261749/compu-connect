@@ -9,8 +9,8 @@
 # It runs nothing of Remote Compute and holds no token. It does see the requests, tokens included, on their way
 # through, because the certificate is here: treat it as part of the box.
 #
-# Meant as the startup script of a Google Compute Engine e2-micro with Debian 12 or later; relay/gcp-tunnel sets
-# all of it up. It runs as root at every boot, and again whenever the instance's mcp-revision changes, and may be
+# Meant as the startup script of a Google Compute Engine e2-micro with Debian 12 or later (see README.md here). It
+# runs as root at every boot, and again whenever the instance's mcp-revision changes, and may be
 # run again at any time. It reads from the instance's metadata:
 #
 #   mcp-domain        the name to serve, e.g. mcp.example.com; its DNS A record must point at this machine
