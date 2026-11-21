@@ -9,59 +9,72 @@ needs no open port and no fixed address.
 its way through, tokens included, because the certificate lives here: whoever is root on the relay can use the box as
 any connected client can. Keep it as bare as it is.
 
-## On Google Cloud
+## On Google Cloud: `gcp-tunnel`
 
-An `e2-micro` is plenty. Google's free tier has covered one in `us-west1`, `us-central1` or `us-east1`; check the
-current terms before you count on it, the external address and outbound traffic in particular.
+`relay/gcp-tunnel` sets up the relay with `gcloud`, and keeps it set up: `up` creates what is missing, changes what
+differs from its settings, and leaves the rest alone, so it is safe to run as often as you like. Each subcommand
+does one thing:
 
-You need the box's tunnel key first. It is made when the module is switched on:
+| command | what it does |
+|---|---|
+| `gcp-tunnel up [--project P] [--domain D] [...]` | Creates or updates everything, then waits until the relay has applied its settings. Remembers what it was given. `--dry-run` only says what it would change; `--recreate` makes the instance anew, keeping its address and identity. |
+| `gcp-tunnel status` | What exists in the project, whether the settings are applied, and from outside: DNS, the certificate, and whether the box is connected. Exit status 1 if anything is missing. |
+| `gcp-tunnel nix` | The box's settings for this relay (`relay.nix`). |
+| `gcp-tunnel ssh [COMMAND]` | Logs in to the relay as its administrator, with a key and host key of its own. |
+| `gcp-tunnel logs` | What the relay's startup script printed, from the serial console. |
+| `gcp-tunnel down [--keep-address] [--yes]` | Deletes it all from the project. The files stay. |
 
-```sh
-cat /var/lib/mcp-tunnel/id_ed25519.pub > tunnel.pub      # on the box, as root
-```
+It needs `gcloud`, logged in (`gcloud auth login`), a project with billing enabled, and `ssh`/`ssh-keygen`. On
+NixOS without `gcloud` it fetches it with `nix shell` by itself.
 
-Then, wherever `gcloud` is logged in to your project, from a checkout of this repository:
+### Files: `.tunnel/`
 
-```sh
-DOMAIN=mcp.example.com
-REGION=us-central1
-ZONE=us-central1-a
+Everything it makes and needs is in `.tunnel/` at the top of this checkout, which git ignores. Keep it: it is what
+makes `up` repeatable.
 
-gcloud compute addresses create mcp-relay --region "$REGION"
-gcloud compute addresses describe mcp-relay --region "$REGION" --format='value(address)'
-```
+| file | what it is |
+|---|---|
+| `config.json` | the settings `up` was given |
+| `host_ed25519` | the relay's SSH host key. The box trusts the relay by it, so a relay made again with `--recreate` or after `down` is still trusted. It is also in the instance's metadata, where anyone who can read the project's instances can read it. |
+| `admin_ed25519` | the key `gcp-tunnel ssh` logs in with. Project-wide SSH keys and OS Login are off for the instance, so only this key gets an administrator in. |
+| `tunnel_key.pub` | the box's tunnel key, from `--tunnel-key` or, when run on the box itself, from `/var/lib/mcp-tunnel/id_ed25519.pub` |
+| `known_hosts` | the relay's host key, for `ssh` |
+| `relay.nix` | `services.compu-connect.domain`, `relay.host` and `relay.hostPublicKey` for the box |
 
-Point an A record for `$DOMAIN` at that address, with whoever serves your domain's DNS. The certificate can only be
-issued once the name resolves to the relay.
+There is no TLS certificate among them: Caddy, on the relay, gets one from Let's Encrypt as soon as the domain
+points at it, and renews it. Let's Encrypt issues at most five certificates a week for the same name, which only
+matters if the relay is made anew more often than that.
 
-```sh
-gcloud compute firewall-rules create mcp-relay --target-tags mcp-relay \
-  --allow tcp:22,tcp:80,tcp:443
-
-gcloud compute instances create mcp-relay --zone "$ZONE" --machine-type e2-micro \
-  --image-family debian-12 --image-project debian-cloud \
-  --boot-disk-size 10GB --boot-disk-type pd-standard \
-  --address mcp-relay --tags mcp-relay \
-  --metadata mcp-domain="$DOMAIN" \
-  --metadata-from-file startup-script=relay/startup.sh,mcp-tunnel-key=tunnel.pub
-```
-
-Port 80 is for the certificate authority's check and the redirect to HTTPS, 22 for the tunnel (and for you). After a
-minute or two the script has finished, and says so on the serial console, together with the relay's SSH host key:
+### From nothing
 
 ```sh
-gcloud compute instances get-serial-port-output mcp-relay --zone "$ZONE" | grep mcp-relay:
+relay/gcp-tunnel up --project my-project --domain mcp.example.com --tunnel-key tunnel.pub
 ```
 
-Give the box the address and that host key (`services.compu-connect.relay.host` and `relay.hostPublicKey`), rebuild
-it, and `mcpctl status` on the box should report the gateway up from outside.
+where `tunnel.pub` is `/var/lib/mcp-tunnel/id_ed25519.pub` from the box (on the box itself, as root, it is found
+without `--tunnel-key`). It then:
 
-To change the domain or the tunnel key later, change the metadata and run the script again, which a reboot does:
+1. turns on the Compute Engine API;
+2. makes a VPC network `mcp-relay` with two firewall rules: 80 and 443 from anywhere, 22 from `--ssh-from`
+   (anywhere by default, since the box's own address may change);
+3. reserves a static external address, so that the DNS record and the box's settings stay right;
+4. with `--dns-zone ZONE`, sets the domain's A record in that Cloud DNS zone; otherwise it tells you what to set;
+5. creates an `e2-micro` Debian instance with no service account, so the relay has no access to the project, and
+   Shielded VM on. Its startup script is `relay/startup.sh`;
+6. waits until the startup script reports that it has applied these exact settings;
+7. writes `relay.nix` and checks from outside, saying what is left to do.
 
-```sh
-gcloud compute instances add-metadata mcp-relay --zone "$ZONE" --metadata-from-file mcp-tunnel-key=tunnel.pub
-gcloud compute instances reset mcp-relay --zone "$ZONE"
-```
+The defaults are the free-tier ones: `us-east1`, `e2-micro`, a 10 GB standard disk. Check Google's current terms
+before you count on it being free, the external address in particular. `--region europe-north1` is closer to
+Sweden but not in the free tier.
+
+Afterwards, `gcp-tunnel up` with no arguments brings it back to the same state. A changed setting (a new tunnel
+key, `--ssh-from`, `--acme-email`, a new version of `startup.sh`) is applied in place: the instance's metadata is
+updated, a watcher on the relay runs the startup script again, and `up` waits for it. Nothing is restarted, and
+the box's tunnel stays up.
+
+Give the box what `gcp-tunnel nix` prints, rebuild it, and `gcp-tunnel status` should end with "the box is
+connected".
 
 ## Anywhere else
 

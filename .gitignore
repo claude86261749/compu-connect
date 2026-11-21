@@ -1,3 +1,5 @@
 __pycache__/
 result
 result-*
+# relay/gcp-tunnel keeps its keys and settings here.
+.tunnel/
